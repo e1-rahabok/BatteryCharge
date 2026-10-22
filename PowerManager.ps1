@@ -1,18 +1,21 @@
 <#
 .SYNOPSIS
-  Power Manager: switch the Dell battery charge mode without rebooting (Dell Command | Configure,
-  cctk.exe), and force Windows to sleep.
+  Power Manager: battery charge limit, battery health and Force Sleep in one small Windows 11 window.
 
 .PARAMETER Mode
-  Window - Small window showing the current setting, with buttons to switch it and to force sleep
-  Full   - Standard charging, charges to 100% (use before going unplugged)
-  Limit  - Custom charging, stops at -Stop (default 65%) and resumes below -Start (default 50%)
-  Toggle - Switch between Full and Limit
-  Status - Show the current setting only
+  Window - The Power Manager window (charge limit, battery health, Force Sleep)
+  Full   - Standard charging, charges to 100% (use before going unplugged)       [Dell only]
+  Limit  - Custom charging, stops at -Stop (default 65%), resumes below -Start   [Dell only]
+  Toggle - Switch between Full and Limit                                         [Dell only]
+  Status - Show the charge setting and battery health
 
 .NOTES
   Needs admin rights; the script re-launches itself elevated (UAC prompt) when needed.
+  The charge limit uses Dell Command | Configure (cctk.exe). Without it, the window still shows
+  battery health and Force Sleep, and hides the charge limit card.
   Dell limits: Start 50-95, Stop 55-100, Stop must be at least 5 above Start.
+  Customise: colours in $Theme below; put background.png or background.jpg next to this script
+  to replace the built-in background. See README.md.
 #>
 param(
     [ValidateSet('Window', 'Full', 'Limit', 'Toggle', 'Status')]
@@ -23,7 +26,21 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$cctk = 'C:\Program Files (x86)\Dell\Command Configure\X86_64\cctk.exe'
+
+# Window colours ("Bloom Glass", dark). Change these to re-theme the window.
+$Theme = @{
+    Bg1 = '#040A22'; Bg2 = '#0A1C55'; Bg3 = '#0B2C86'          # background gradient, top-left to bottom-right
+    Ribbon1 = '#1A4DFF'; Ribbon2 = '#3F8CFF'; Ribbon3 = '#5BA3FF'; RibbonLine = '#9CC4FF'   # flowing ribbons
+    Ring1 = '#7CE3FF'; Ring2 = '#3D7BFF'                       # battery ring gauge
+    Accent1 = '#2F6BFF'; Accent2 = '#5AB0FF'; Glow = '#3D7BFF' # main button gradient and glow
+    Text = '#FFFFFF'; Sub = '#C3D2FA'; Icon = '#7FB2FF'
+    Ok = '#8EE07F'; Warn = '#FFC84A'; Bad = '#FF99A4'          # health / status colours
+}
+
+# Dell Command | Configure installs to either Program Files folder depending on version.
+$cctk = "${env:ProgramFiles(x86)}\Dell\Command Configure\X86_64\cctk.exe",
+        "$env:ProgramFiles\Dell\Command Configure\X86_64\cctk.exe" |
+    Where-Object { Test-Path $_ } | Select-Object -First 1
 
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 function Show-Result([string]$Text, [string]$Icon = 'Information') {
@@ -48,11 +65,93 @@ if (-not $isAdmin) {
     exit
 }
 
-if (-not (Test-Path $cctk)) {
-    Show-Result "Dell Command | Configure not found at:`n$cctk" 'Error'; exit 1
+if (-not $cctk -and $Mode -in 'Full', 'Limit', 'Toggle') {
+    Show-Result "Dell Command | Configure (cctk.exe) was not found, so the charge limit can't be changed." 'Error'; exit 1
 }
 if ($Stop - $Start -lt 5) {
     Show-Result "Stop ($Stop) must be at least 5 higher than Start ($Start)." 'Error'; exit 1
+}
+
+# Native calls, compiled once: battery driver query, sleep, and title bar colour.
+if (-not ('PowerManager.Native' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+namespace PowerManager {
+public static class Native {
+    [StructLayout(LayoutKind.Sequential)]
+    struct SP_DEVICE_INTERFACE_DATA { public int cbSize; public Guid InterfaceClassGuid; public int Flags; public IntPtr Reserved; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct BATTERY_QUERY_INFORMATION { public uint BatteryTag; public int InformationLevel; public int AtRate; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct BATTERY_INFORMATION {
+        public uint Capabilities; public byte Technology; public byte R1, R2, R3;
+        public byte C1, C2, C3, C4;
+        public uint DesignedCapacity, FullChargedCapacity, DefaultAlert1, DefaultAlert2, CriticalBias, CycleCount;
+    }
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern IntPtr SetupDiGetClassDevs(ref Guid g, IntPtr e, IntPtr h, int flags);
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern bool SetupDiEnumDeviceInterfaces(IntPtr set, IntPtr info, ref Guid g, int i, ref SP_DEVICE_INTERFACE_DATA d);
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool SetupDiGetDeviceInterfaceDetail(IntPtr set, ref SP_DEVICE_INTERFACE_DATA d, IntPtr detail, int size, out int req, IntPtr info);
+    [DllImport("setupapi.dll")]
+    static extern bool SetupDiDestroyDeviceInfoList(IntPtr set);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr sa, uint disp, uint flags, IntPtr t);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool DeviceIoControl(SafeFileHandle h, uint code, ref uint inBuf, int inSize, out uint outBuf, int outSize, out int ret, IntPtr o);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool DeviceIoControl(SafeFileHandle h, uint code, ref BATTERY_QUERY_INFORMATION inBuf, int inSize, out BATTERY_INFORMATION outBuf, int outSize, out int ret, IntPtr o);
+
+    const uint IOCTL_BATTERY_QUERY_TAG = 0x294040, IOCTL_BATTERY_QUERY_INFORMATION = 0x294044;
+
+    // Asks each battery driver directly (the source powercfg /batteryreport reads), no admin needed.
+    // One entry per battery: { DesignedCapacity mWh, FullChargedCapacity mWh, CycleCount }.
+    public static List<uint[]> QueryBatteries() {
+        var result = new List<uint[]>();
+        Guid battery = new Guid("72631e54-78a4-11d0-bcf7-00aa00b7b32a");   // GUID_DEVCLASS_BATTERY
+        IntPtr set = SetupDiGetClassDevs(ref battery, IntPtr.Zero, IntPtr.Zero, 0x12);   // PRESENT | DEVICEINTERFACE
+        if (set == new IntPtr(-1)) return result;
+        try {
+            for (int i = 0; i < 8; i++) {
+                var d = new SP_DEVICE_INTERFACE_DATA(); d.cbSize = Marshal.SizeOf(d);
+                if (!SetupDiEnumDeviceInterfaces(set, IntPtr.Zero, ref battery, i, ref d)) break;
+                int size;
+                SetupDiGetDeviceInterfaceDetail(set, ref d, IntPtr.Zero, 0, out size, IntPtr.Zero);
+                IntPtr detail = Marshal.AllocHGlobal(size);
+                string path;
+                try {
+                    Marshal.WriteInt32(detail, IntPtr.Size == 8 ? 8 : 6);   // SP_DEVICE_INTERFACE_DETAIL_DATA_W.cbSize
+                    if (!SetupDiGetDeviceInterfaceDetail(set, ref d, detail, size, out size, IntPtr.Zero)) continue;
+                    path = Marshal.PtrToStringUni(new IntPtr(detail.ToInt64() + 4));
+                } finally { Marshal.FreeHGlobal(detail); }
+                using (var h = CreateFile(path, 0xC0000000, 3, IntPtr.Zero, 3, 0x80, IntPtr.Zero)) {
+                    if (h.IsInvalid) continue;
+                    uint wait = 0, tag; int ret;
+                    if (!DeviceIoControl(h, IOCTL_BATTERY_QUERY_TAG, ref wait, 4, out tag, 4, out ret, IntPtr.Zero) || tag == 0) continue;
+                    var q = new BATTERY_QUERY_INFORMATION(); q.BatteryTag = tag; q.InformationLevel = 0;   // BatteryInformation
+                    BATTERY_INFORMATION bi;
+                    if (!DeviceIoControl(h, IOCTL_BATTERY_QUERY_INFORMATION, ref q, Marshal.SizeOf(q), out bi,
+                            Marshal.SizeOf(typeof(BATTERY_INFORMATION)), out ret, IntPtr.Zero)) continue;
+                    result.Add(new uint[] { bi.DesignedCapacity, bi.FullChargedCapacity, bi.CycleCount });
+                }
+            }
+        } finally { SetupDiDestroyDeviceInfoList(set); }
+        return result;
+    }
+
+    [DllImport("powrprof.dll", SetLastError = true)]
+    public static extern bool SetSuspendState(bool hibernate, bool forceCritical, bool disableWakeEvent);
+
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+}
+}
+'@
 }
 
 function Get-ChargeCfg {
@@ -70,6 +169,30 @@ function Get-Battery {
 function Get-BatteryText {
     $b = Get-Battery
     if ($b) { "Battery now: $($b.Percent)% ($($b.State))" } else { '' }
+}
+
+# Design capacity, current full charge capacity (both mWh) and cycle count, summed over all
+# batteries. Cycles is $null when the battery doesn't report it.
+function Get-BatteryHealth {
+    $all = @([PowerManager.Native]::QueryBatteries() | Where-Object { $_[0] -gt 0 })
+    if (-not $all) { return $null }
+    $design = ($all | ForEach-Object { [double]$_[0] } | Measure-Object -Sum).Sum
+    $full = ($all | ForEach-Object { [double]$_[1] } | Measure-Object -Sum).Sum
+    $cycles = ($all | ForEach-Object { [double]$_[2] } | Measure-Object -Sum).Sum
+    [pscustomobject]@{
+        DesignWh = $design / 1000
+        FullWh   = $full / 1000
+        Health   = [Math]::Min(100, [Math]::Round(100 * $full / $design))
+        Cycles   = if ($cycles -gt 0) { [int]$cycles } else { $null }
+    }
+}
+
+function Get-HealthText {
+    $h = Get-BatteryHealth
+    if (-not $h) { return 'Battery health: not reported' }
+    $cyc = if ($null -ne $h.Cycles) { $h.Cycles } else { 'not reported' }
+    'Original capacity: {0:N1} Wh{4}Full charge capacity: {1:N1} Wh ({2}% health){4}Charge cycles: {3}' -f
+        $h.DesignWh, $h.FullWh, $h.Health, $cyc, "`n"
 }
 
 # Throws with cctk's output when the change fails.
@@ -118,32 +241,22 @@ function Stop-SleepBlockers($procs, [scriptblock]$wait = { Start-Sleep -Millisec
 }
 
 function Invoke-Sleep {
-    if (-not ('Win32.Power' -as [type])) {
-        Add-Type -Namespace Win32 -Name Power -MemberDefinition '[DllImport("powrprof.dll", SetLastError = true)] public static extern bool SetSuspendState(bool hibernate, bool forceCritical, bool disableWakeEvent);'
-    }
-    if (-not [Win32.Power]::SetSuspendState($false, $false, $false)) {
+    if (-not [PowerManager.Native]::SetSuspendState($false, $false, $false)) {
         throw "Windows refused to sleep (error $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))."
     }
 }
 
-function Show-Window {
-    Add-Type -AssemblyName PresentationFramework
-    $dark = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -ErrorAction SilentlyContinue).AppsUseLightTheme -eq 0
-    $c = if ($dark) {
-        @{ Bg = '#202020'; Text = '#FFFFFF'; Sub = '#C8C8C8'; Line = '#3A3A3A'; Shell = '#9E9E9E'
-           Ok = '#6CCB5F'; Warn = '#FFB900'; Accent = '#4CC2FF'; OnAccent = '#000000' }
-    } else {
-        @{ Bg = '#F3F3F3'; Text = '#1A1A1A'; Sub = '#5D5D5D'; Line = '#DEDEDE'; Shell = '#7A7A7A'
-           Ok = '#0F7B0F'; Warn = '#9D5D00'; Accent = '#005FB8'; OnAccent = '#FFFFFF' }
-    }
-    # Battery gauge: 90 px outline, 2.5 px border and 4 px padding leave 77 px for the fill.
-    $gauge = 77
+function New-WindowXaml {
+    # Card inner width: 400 window - 40 margin - 36 card padding - 2 border = 322 px.
     $xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Power Manager" SizeToContent="WidthAndHeight" ResizeMode="NoResize"
-        WindowStartupLocation="CenterScreen" Topmost="True" UseLayoutRounding="True"
-        Background="@Bg@" Foreground="@Text@" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="14">
+        Title="Power Manager" Width="400" SizeToContent="Height" ResizeMode="CanMinimize" WindowStyle="None"
+        WindowStartupLocation="CenterScreen" Topmost="True" UseLayoutRounding="True" Background="@Bg1@"
+        Foreground="@Text@" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="14">
+  <WindowChrome.WindowChrome>
+    <WindowChrome CaptionHeight="44" GlassFrameThickness="0,0,0,1" ResizeBorderThickness="0" CornerRadius="0" UseAeroCaptionButtons="False"/>
+  </WindowChrome.WindowChrome>
   <Window.Icon>
     <DrawingImage>
       <DrawingImage.Drawing>
@@ -153,116 +266,372 @@ function Show-Window {
             <GeometryDrawing.Pen><Pen Brush="@Text@" Thickness="2"/></GeometryDrawing.Pen>
           </GeometryDrawing>
           <GeometryDrawing Brush="@Text@" Geometry="M28.5,13 H30 V19 H28.5 Z"/>
-          <GeometryDrawing Brush="@Accent@" Geometry="M4,12.5 H17 V19.5 H4 Z"/>
+          <GeometryDrawing Brush="@Ring2@" Geometry="M4,12.5 H17 V19.5 H4 Z"/>
         </DrawingGroup>
       </DrawingImage.Drawing>
     </DrawingImage>
   </Window.Icon>
-  <StackPanel Width="300" Margin="28,24,28,24">
-    <StackPanel Orientation="Horizontal">
-      <Grid Width="96" Height="46" VerticalAlignment="Center">
-        <Border Width="90" HorizontalAlignment="Left" CornerRadius="8" BorderThickness="2.5" BorderBrush="@Shell@" Padding="4">
+  <Window.Resources>
+    <Style x:Key="Glass" TargetType="Border">
+      <Setter Property="CornerRadius" Value="16"/>
+      <Setter Property="Padding" Value="18,14,18,16"/>
+      <Setter Property="Margin" Value="0,0,0,12"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Background">
+        <Setter.Value>
+          <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+            <GradientStop Color="#30FFFFFF" Offset="0"/>
+            <GradientStop Color="#10FFFFFF" Offset="1"/>
+          </LinearGradientBrush>
+        </Setter.Value>
+      </Setter>
+      <Setter Property="BorderBrush">
+        <Setter.Value>
+          <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+            <GradientStop Color="#60FFFFFF" Offset="0"/>
+            <GradientStop Color="#14FFFFFF" Offset="1"/>
+          </LinearGradientBrush>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="Tile" TargetType="Border">
+      <Setter Property="CornerRadius" Value="12"/>
+      <Setter Property="Background" Value="#16FFFFFF"/>
+      <Setter Property="Padding" Value="11,9"/>
+    </Style>
+    <Style x:Key="Label" TargetType="TextBlock">
+      <Setter Property="FontSize" Value="12.5"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Foreground" Value="@Sub@"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+    </Style>
+    <Style x:Key="Small" TargetType="TextBlock">
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Foreground" Value="@Sub@"/>
+      <Setter Property="TextWrapping" Value="Wrap"/>
+    </Style>
+    <Style x:Key="Icon" TargetType="TextBlock">
+      <Setter Property="FontFamily" Value="Segoe Fluent Icons, Segoe MDL2 Assets"/>
+      <Setter Property="FontSize" Value="14"/>
+      <Setter Property="Foreground" Value="@Icon@"/>
+      <Setter Property="Margin" Value="0,1,9,0"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+    </Style>
+    <ControlTemplate x:Key="Pill" TargetType="Button">
+      <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+              BorderThickness="{TemplateBinding BorderThickness}"
+              CornerRadius="{Binding Tag, RelativeSource={RelativeSource TemplatedParent}}">
+        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="{TemplateBinding Padding}"/>
+      </Border>
+      <ControlTemplate.Triggers>
+        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Bd" Property="Opacity" Value="0.88"/></Trigger>
+        <Trigger Property="IsPressed" Value="True"><Setter TargetName="Bd" Property="Opacity" Value="0.72"/></Trigger>
+        <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Bd" Property="Opacity" Value="0.5"/></Trigger>
+      </ControlTemplate.Triggers>
+    </ControlTemplate>
+    <Style x:Key="Primary" TargetType="Button">
+      <Setter Property="Template" Value="{StaticResource Pill}"/>
+      <Setter Property="Tag" Value="20"/>
+      <Setter Property="Height" Value="40"/>
+      <Setter Property="Foreground" Value="@Text@"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="Background">
+        <Setter.Value>
+          <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+            <GradientStop Color="@Accent1@" Offset="0"/>
+            <GradientStop Color="@Accent2@" Offset="1"/>
+          </LinearGradientBrush>
+        </Setter.Value>
+      </Setter>
+      <Setter Property="Effect">
+        <Setter.Value><DropShadowEffect Color="@Glow@" BlurRadius="24" ShadowDepth="0" Opacity="0.8"/></Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="Outline" TargetType="Button" BasedOn="{StaticResource Primary}">
+      <Setter Property="Tag" Value="18"/>
+      <Setter Property="Height" Value="36"/>
+      <Setter Property="Padding" Value="16,0"/>
+      <Setter Property="Background" Value="#16FFFFFF"/>
+      <Setter Property="BorderBrush" Value="#88A9C8FF"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Effect" Value="{x:Null}"/>
+    </Style>
+    <Style x:Key="TitleButton" TargetType="Button">
+      <Setter Property="WindowChrome.IsHitTestVisibleInChrome" Value="True"/>
+      <Setter Property="Width" Value="40"/>
+      <Setter Property="Height" Value="32"/>
+      <Setter Property="Foreground" Value="#D6E2FF"/>
+      <Setter Property="FontFamily" Value="Segoe Fluent Icons, Segoe MDL2 Assets"/>
+      <Setter Property="FontSize" Value="10"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Bd" Background="Transparent" CornerRadius="6">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Bd" Property="Background" Value="#22FFFFFF"/></Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="Bd" Property="Background" Value="#14FFFFFF"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Window.Resources>
+
+  <Grid ClipToBounds="True">
+    <!-- Bloom background: gradient with blurred, flowing ribbons. -->
+    <Grid.Background>
+      <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+        <GradientStop Color="@Bg1@" Offset="0"/>
+        <GradientStop Color="@Bg2@" Offset="0.55"/>
+        <GradientStop Color="@Bg3@" Offset="1"/>
+      </LinearGradientBrush>
+    </Grid.Background>
+    <Canvas IsHitTestVisible="False">
+      <Path Data="M520,40 C330,90 250,250 330,420 C400,560 300,700 120,820 L520,820 Z" Opacity="0.85">
+        <Path.Fill><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="@Ribbon1@" Offset="0"/><GradientStop Color="@Bg2@" Offset="1"/></LinearGradientBrush></Path.Fill>
+        <Path.Effect><BlurEffect Radius="40"/></Path.Effect>
+      </Path>
+      <Path Data="M470,-20 C260,120 210,300 300,430 C370,540 250,660 60,800" StrokeThickness="70" Opacity="0.75">
+        <Path.Stroke><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="@Ribbon2@" Offset="0"/><GradientStop Color="@Ribbon1@" Offset="0.6"/><GradientStop Color="@Bg2@" Offset="1"/></LinearGradientBrush></Path.Stroke>
+        <Path.Effect><BlurEffect Radius="18"/></Path.Effect>
+      </Path>
+      <Path Data="M450,-10 C250,130 205,300 292,428 C360,530 245,650 50,790" StrokeThickness="3" Opacity="0.5" Stroke="@RibbonLine@">
+        <Path.Effect><BlurEffect Radius="2"/></Path.Effect>
+      </Path>
+      <Path Data="M500,120 C360,210 330,330 390,450 C440,560 380,650 260,800" StrokeThickness="40" Opacity="0.55">
+        <Path.Stroke><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="@Ribbon3@" Offset="0"/><GradientStop Color="@Ribbon1@" Offset="1"/></LinearGradientBrush></Path.Stroke>
+        <Path.Effect><BlurEffect Radius="12"/></Path.Effect>
+      </Path>
+      <Ellipse Canvas.Left="-120" Canvas.Top="-140" Width="360" Height="360" Opacity="0.35">
+        <Ellipse.Fill><RadialGradientBrush><GradientStop Color="@Ribbon2@" Offset="0"/><GradientStop Color="Transparent" Offset="1"/></RadialGradientBrush></Ellipse.Fill>
+      </Ellipse>
+    </Canvas>
+    <Image x:Name="BgImage" Stretch="UniformToFill" Opacity="0.35" Visibility="Collapsed" IsHitTestVisible="False"/>
+
+    <DockPanel Margin="20,0,12,8">
+      <!-- Title bar (drag area comes from WindowChrome) -->
+      <Grid DockPanel.Dock="Top" Height="44">
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+          <TextBlock Style="{StaticResource Icon}" Text="&#xE945;" Foreground="@RibbonLine@"/>
+          <TextBlock Text="Power Manager" FontSize="12.5" Foreground="#D6E2FF"/>
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+          <Button x:Name="MinButton" Style="{StaticResource TitleButton}" Content="&#xE921;" ToolTip="Minimize"/>
+          <Button x:Name="CloseButton" Style="{StaticResource TitleButton}" Content="&#xE8BB;" ToolTip="Close"/>
+        </StackPanel>
+      </Grid>
+
+      <StackPanel Margin="0,0,8,0">
+        <!-- Ring gauge -->
+        <Grid Width="200" Height="200" Margin="0,4,0,14">
+          <Ellipse Width="170" Height="170" Opacity="0.5">
+            <Ellipse.Fill><RadialGradientBrush><GradientStop Color="@Accent1@" Offset="0"/><GradientStop Color="Transparent" Offset="1"/></RadialGradientBrush></Ellipse.Fill>
+          </Ellipse>
+          <Canvas Width="180" Height="180">
+            <Ellipse Width="156" Height="156" Canvas.Left="12" Canvas.Top="12" Stroke="#22FFFFFF" StrokeThickness="12"/>
+            <Path x:Name="Arc" StrokeThickness="12" StrokeStartLineCap="Round" StrokeEndLineCap="Round">
+              <Path.Stroke><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="@Ring1@" Offset="0"/><GradientStop Color="@Ring2@" Offset="1"/></LinearGradientBrush></Path.Stroke>
+              <Path.Effect><DropShadowEffect Color="@Ring2@" BlurRadius="22" ShadowDepth="0" Opacity="0.9"/></Path.Effect>
+            </Path>
+            <Line x:Name="CapTick" Stroke="@Text@" StrokeThickness="2.5" Opacity="0.85" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+          </Canvas>
+          <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+            <TextBlock x:Name="Percent" FontFamily="Segoe UI Variable Display, Segoe UI" FontSize="46" FontWeight="SemiBold" HorizontalAlignment="Center"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+              <TextBlock x:Name="PowerIcon" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="12" Foreground="@RibbonLine@" Margin="0,2,6,0"/>
+              <TextBlock x:Name="Power" FontSize="13" Foreground="@Sub@"/>
+            </StackPanel>
+          </StackPanel>
+        </Grid>
+
+        <!-- Charge limit (Dell Command | Configure) -->
+        <Border Style="{StaticResource Glass}">
+          <StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+              <TextBlock Style="{StaticResource Icon}" Text="&#xEBB5;"/>
+              <TextBlock Style="{StaticResource Label}" Text="Charge limit"/>
+            </StackPanel>
+            <Grid>
+              <StackPanel Margin="0,0,90,0">
+                <TextBlock x:Name="Status" FontSize="18" FontWeight="SemiBold"/>
+                <TextBlock x:Name="Detail" Style="{StaticResource Small}" FontSize="12.5" Margin="0,2,0,0"/>
+              </StackPanel>
+              <Border x:Name="Badge" HorizontalAlignment="Right" VerticalAlignment="Center" CornerRadius="10" Padding="9,3">
+                <TextBlock x:Name="BadgeText" FontSize="11.5" FontWeight="SemiBold"/>
+              </Border>
+            </Grid>
+            <Button x:Name="Action" Style="{StaticResource Primary}" Margin="0,14,0,0" IsDefault="True">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" Text="&#xE945;" FontSize="13" Margin="0,2,8,0"/>
+                <TextBlock x:Name="ActionText"/>
+              </StackPanel>
+            </Button>
+          </StackPanel>
+        </Border>
+
+        <!-- Battery health -->
+        <Border Style="{StaticResource Glass}">
+          <StackPanel>
+            <Grid Margin="0,0,0,10">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Style="{StaticResource Icon}" Text="&#xE95E;"/>
+                <TextBlock Style="{StaticResource Label}" Text="Battery health"/>
+              </StackPanel>
+              <TextBlock x:Name="HealthText" HorizontalAlignment="Right" VerticalAlignment="Center" FontSize="12.5" FontWeight="SemiBold"/>
+            </Grid>
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="8"/><ColumnDefinition/><ColumnDefinition Width="8"/><ColumnDefinition/></Grid.ColumnDefinitions>
+              <Border Style="{StaticResource Tile}" ToolTip="Capacity the battery was designed to hold when new">
+                <StackPanel><TextBlock x:Name="DesignCap" FontSize="19" FontWeight="SemiBold"/><TextBlock Style="{StaticResource Small}" FontSize="11.5" Text="Wh original"/></StackPanel>
+              </Border>
+              <Border Grid.Column="2" Style="{StaticResource Tile}" ToolTip="What a full charge holds today; drops as the battery wears">
+                <StackPanel><TextBlock x:Name="FullCap" FontSize="19" FontWeight="SemiBold"/><TextBlock Style="{StaticResource Small}" FontSize="11.5" Text="Wh now"/></StackPanel>
+              </Border>
+              <Border Grid.Column="4" Style="{StaticResource Tile}" ToolTip="Full charge cycles completed so far">
+                <StackPanel><TextBlock x:Name="Cycles" FontSize="19" FontWeight="SemiBold"/><TextBlock Style="{StaticResource Small}" FontSize="11.5" Text="cycles"/></StackPanel>
+              </Border>
+            </Grid>
+            <Grid Height="6" Margin="0,12,0,0">
+              <Border CornerRadius="3" Background="#22FFFFFF"/>
+              <Border x:Name="HealthBar" CornerRadius="3" HorizontalAlignment="Left">
+                <Border.Effect><DropShadowEffect x:Name="HealthGlow" BlurRadius="10" ShadowDepth="0" Opacity="0.8"/></Border.Effect>
+              </Border>
+            </Grid>
+          </StackPanel>
+        </Border>
+
+        <!-- Sleep -->
+        <Border Style="{StaticResource Glass}">
           <Grid>
-            <Border x:Name="Fill" HorizontalAlignment="Left" CornerRadius="4"/>
-            <Rectangle x:Name="CapMark" Width="2" HorizontalAlignment="Left" Fill="@Text@" Opacity="0.6" RadiusX="1" RadiusY="1"/>
+            <StackPanel VerticalAlignment="Center" Margin="0,0,128,0">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Style="{StaticResource Icon}" Text="&#xE708;"/>
+                <TextBlock Style="{StaticResource Label}" Text="Sleep"/>
+              </StackPanel>
+              <TextBlock Style="{StaticResource Small}" Text="Closes apps keeping Windows awake" Margin="0,4,0,0"/>
+            </StackPanel>
+            <Button x:Name="Sleep" Style="{StaticResource Outline}" HorizontalAlignment="Right" VerticalAlignment="Center" Content="Force Sleep"/>
           </Grid>
         </Border>
-        <Border Width="5" Height="16" HorizontalAlignment="Right" Margin="0,0,1,0" CornerRadius="0,3,3,0" Background="@Shell@"/>
-      </Grid>
-      <StackPanel Margin="18,0,0,0" VerticalAlignment="Center">
-        <TextBlock x:Name="Percent" FontFamily="Segoe UI Variable Display, Segoe UI" FontSize="32" FontWeight="SemiBold"/>
-        <TextBlock x:Name="Power" Foreground="@Sub@" FontSize="13"/>
       </StackPanel>
-    </StackPanel>
-    <Border Height="1" Background="@Line@" Margin="0,20,0,18"/>
-    <StackPanel Orientation="Horizontal">
-      <Ellipse x:Name="Dot" Width="9" Height="9" VerticalAlignment="Center" Margin="0,2,9,0"/>
-      <TextBlock x:Name="Status" FontSize="17" FontWeight="SemiBold"/>
-    </StackPanel>
-    <TextBlock x:Name="Detail" Foreground="@Sub@" FontSize="13" TextWrapping="Wrap" Margin="18,3,0,20"/>
-    <Button x:Name="Action" Height="38" Background="@Accent@" Foreground="@OnAccent@" FontWeight="SemiBold"
-            Cursor="Hand" IsDefault="True" FocusVisualStyle="{x:Null}">
-      <Button.Template>
-        <ControlTemplate TargetType="Button">
-          <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="6">
-            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-          </Border>
-          <ControlTemplate.Triggers>
-            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Bd" Property="Opacity" Value="0.9"/></Trigger>
-            <Trigger Property="IsPressed" Value="True"><Setter TargetName="Bd" Property="Opacity" Value="0.78"/></Trigger>
-            <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Bd" Property="Opacity" Value="0.5"/></Trigger>
-          </ControlTemplate.Triggers>
-        </ControlTemplate>
-      </Button.Template>
-    </Button>
-    <TextBlock x:Name="Hint" Foreground="@Sub@" FontSize="12" HorizontalAlignment="Center" Margin="0,8,0,0"/>
-    <Border Height="1" Background="@Line@" Margin="0,20,0,18"/>
-    <Button x:Name="Sleep" Height="34" Content="Force Sleep" Background="Transparent" Foreground="@Text@"
-            BorderBrush="@Shell@" Cursor="Hand" FocusVisualStyle="{x:Null}">
-      <Button.Template>
-        <ControlTemplate TargetType="Button">
-          <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
-                  BorderThickness="1" CornerRadius="6">
-            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-          </Border>
-          <ControlTemplate.Triggers>
-            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Bd" Property="Background" Value="@Line@"/></Trigger>
-            <Trigger Property="IsPressed" Value="True"><Setter TargetName="Bd" Property="Opacity" Value="0.78"/></Trigger>
-            <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Bd" Property="Opacity" Value="0.5"/></Trigger>
-          </ControlTemplate.Triggers>
-        </ControlTemplate>
-      </Button.Template>
-    </Button>
-    <TextBlock Foreground="@Sub@" FontSize="12" HorizontalAlignment="Center" Margin="0,8,0,0"
-               Text="Closes apps that keep Windows awake, then sleeps."/>
-  </StackPanel>
+    </DockPanel>
+  </Grid>
 </Window>
 "@
-    foreach ($k in $c.Keys) { $xaml = $xaml.Replace("@$k@", $c[$k]) }
-    $window = [Windows.Markup.XamlReader]::Parse($xaml)
+    foreach ($k in $Theme.Keys) { $xaml = $xaml.Replace("@$k@", $Theme[$k]) }
+    $xaml
+}
+
+function Show-Window {
+    # PowerShell 7 doesn't load WPF's core assemblies along with PresentationFramework, so name all three.
+    Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
+    $c = $Theme
+    $inv = [Globalization.CultureInfo]::InvariantCulture
+    $window = [Windows.Markup.XamlReader]::Parse((New-WindowXaml))
     $ui = @{}
-    foreach ($n in 'Fill', 'CapMark', 'Percent', 'Power', 'Dot', 'Status', 'Detail', 'Action', 'Hint', 'Sleep') { $ui[$n] = $window.FindName($n) }
+    foreach ($n in 'Arc', 'CapTick', 'Percent', 'PowerIcon', 'Power', 'Status', 'Detail', 'Badge', 'BadgeText',
+                   'Action', 'ActionText', 'HealthText', 'DesignCap', 'FullCap', 'Cycles', 'HealthBar', 'HealthGlow',
+                   'Sleep', 'MinButton', 'CloseButton', 'BgImage') {
+        $ui[$n] = $window.FindName($n)
+    }
     $brush = { param($hex) (New-Object Windows.Media.BrushConverter).ConvertFromString($hex) }
+    $color = { param($hex) [Windows.Media.ColorConverter]::ConvertFromString($hex) }
+    # Point on the gauge ring (centre 90,90) at a percentage of the full circle, clockwise from the top.
+    $ringPoint = { param($pct, $r)
+        $a = [Math]::Min(359.9, 3.6 * $pct) * [Math]::PI / 180
+        New-Object Windows.Point((90 + $r * [Math]::Sin($a)), (90 - $r * [Math]::Cos($a)))
+    }
+
+    # Optional custom background: background.png / .jpg next to the script.
+    $bgFile = Get-ChildItem $PSScriptRoot -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.BaseName -eq 'background' -and $_.Extension -in '.png', '.jpg', '.jpeg' } | Select-Object -First 1
+    if ($bgFile) {
+        $img = New-Object Windows.Media.Imaging.BitmapImage
+        $img.BeginInit(); $img.CacheOption = 'OnLoad'; $img.UriSource = New-Object Uri($bgFile.FullName); $img.EndInit()
+        $ui.BgImage.Source = $img
+        $ui.BgImage.Visibility = 'Visible'
+    }
 
     # Handlers run in a child scope, so shared state lives in a hashtable.
-    $state = @{ Capped = $false; Sleep = $false }
+    $state = @{ Capped = $false; Sleep = $false; Cap = $null }
     $showBattery = {
         $b = Get-Battery
-        if ($b) {
-            $ui.Percent.Text = "$($b.Percent)%"
-            $ui.Power.Text = $b.State.Substring(0, 1).ToUpper() + $b.State.Substring(1)
-            $ui.Fill.Width = [Math]::Max(6, $gauge * $b.Percent / 100)
-        } else {
-            $ui.Percent.Text = '--'; $ui.Power.Text = 'No battery found'; $ui.Fill.Width = 0
+        if (-not $b) {
+            $ui.Percent.Text = '--'; $ui.Power.Text = 'No battery found'; $ui.PowerIcon.Text = ''
+            $ui.Arc.Visibility = 'Collapsed'
+            return
         }
+        $ui.Percent.Text = "$($b.Percent)%"
+        $ui.Power.Text = if ($b.State -eq 'on battery') { 'On battery' } else { 'Plugged in' }
+        $ui.PowerIcon.Text = if ($b.State -eq 'on battery') { [string][char]0xE83F } else { [string][char]0xE83E }
+        if ($b.Percent -le 0) { $ui.Arc.Visibility = 'Collapsed'; return }
+        $end = & $ringPoint $b.Percent 78
+        $large = if ($b.Percent -gt 50) { 1 } else { 0 }
+        $ui.Arc.Data = [Windows.Media.Geometry]::Parse(
+            ('M90,12 A78,78 0 {0} 1 {1},{2}' -f $large, $end.X.ToString('0.##', $inv), $end.Y.ToString('0.##', $inv)))
+        $ui.Arc.Visibility = 'Visible'
+    }
+    $showHealth = {
+        $h = Get-BatteryHealth
+        if (-not $h) {
+            $ui.HealthText.Text = 'Not reported'; $ui.HealthText.Foreground = & $brush $c.Sub
+            foreach ($n in 'DesignCap', 'FullCap', 'Cycles') { $ui[$n].Text = '--' }
+            $ui.HealthBar.Width = 0
+            return
+        }
+        $word, $hex = if ($h.Health -ge 80) { 'Good', $c.Ok } elseif ($h.Health -ge 60) { 'Worn', $c.Warn } else { 'Replace soon', $c.Bad }
+        $ui.HealthText.Text = "$($h.Health)% $([char]0xB7) $word"
+        $ui.HealthText.Foreground = & $brush $hex
+        $ui.HealthBar.Background = & $brush $hex
+        $ui.HealthGlow.Color = & $color $hex
+        $ui.HealthBar.Width = [Math]::Max(6, 322 * $h.Health / 100)
+        $ui.DesignCap.Text = '{0:N1}' -f $h.DesignWh
+        $ui.FullCap.Text = '{0:N1}' -f $h.FullWh
+        $ui.Cycles.Text = if ($null -ne $h.Cycles) { "$($h.Cycles)" } else { '--' }
+    }
+    $setBadge = { param($text, $hex)
+        $ui.BadgeText.Text = $text
+        $ui.BadgeText.Foreground = & $brush $hex
+        $ui.Badge.Background = & $brush ('#2A' + $hex.TrimStart('#'))
     }
     $refresh = {
-        $cfg = Get-ChargeCfg
-        $state.Capped = $cfg -match '^Custom:(\d+)-(\d+)$'
-        if ($state.Capped) {
-            $resume, $cap = $Matches[1], $Matches[2]
-            $ui.Status.Text = "Capped at $cap%"
-            $ui.Detail.Text = "Charging stops at $cap% and resumes below $resume%."
-            $ui.Action.Content = 'Charge to 100%'
-            $ui.Hint.Text = 'Do this before you go unplugged.'
-            $ui.CapMark.Margin = New-Object Windows.Thickness(($gauge * $cap / 100 - 1), 0, 0, 0)
-            $ui.CapMark.Visibility = 'Visible'
-            $color = $c.Ok
+        $ui.CapTick.Visibility = 'Collapsed'
+        if (-not $cctk) {
+            $ui.Status.Text = 'Not available'
+            $ui.Detail.Text = 'Needs Dell Command | Configure. See the README for other laptops.'
+            $ui.Action.Visibility = 'Collapsed'; $ui.Badge.Visibility = 'Collapsed'
         } else {
-            $ui.Status.Text = 'Charging to 100%'
-            $ui.Detail.Text = if ($cfg -eq 'Standard') { 'No charge limit is set.' } else { "BIOS charge mode: $cfg" }
-            $ui.Action.Content = "Cap at $Stop%"
-            $ui.Hint.Text = 'Protects the battery while you stay plugged in.'
-            $ui.CapMark.Visibility = 'Collapsed'
-            $color = $c.Warn
+            $cfg = Get-ChargeCfg
+            $state.Capped = $cfg -match '^Custom:(\d+)-(\d+)$'
+            if ($state.Capped) {
+                $resume, $cap = $Matches[1], $Matches[2]
+                $ui.Status.Text = "Capped at $cap%"
+                $ui.Detail.Text = "Stops at $cap%, resumes below $resume%"
+                $ui.ActionText.Text = 'Charge to 100%'
+                & $setBadge 'Protected' $c.Ok
+                # Tick across the ring where charging stops.
+                $p1 = & $ringPoint ([int]$cap) 68; $p2 = & $ringPoint ([int]$cap) 90
+                $ui.CapTick.X1 = $p1.X; $ui.CapTick.Y1 = $p1.Y; $ui.CapTick.X2 = $p2.X; $ui.CapTick.Y2 = $p2.Y
+                $ui.CapTick.Visibility = 'Visible'
+            } else {
+                $ui.Status.Text = 'Charging to 100%'
+                $ui.Detail.Text = if ($cfg -eq 'Standard') { 'No charge limit is set' } else { "BIOS charge mode: $cfg" }
+                $ui.ActionText.Text = "Cap at $Stop%"
+                & $setBadge 'Full charge' $c.Warn
+            }
         }
-        $ui.Dot.Fill = & $brush $color
-        $ui.Fill.Background = & $brush $color
         & $showBattery
+        & $showHealth
     }
     $ui.Action.add_Click({
         $ui.Action.IsEnabled = $false
-        $ui.Action.Content = 'Applying...'
+        $ui.ActionText.Text = 'Applying...'
         # Let the button repaint before cctk blocks the UI thread.
         $window.Dispatcher.Invoke([action] {}, [Windows.Threading.DispatcherPriority]::Background)
         try {
@@ -294,18 +663,20 @@ function Show-Window {
         $state.Sleep = $true
         $window.Close()
     })
+    $ui.MinButton.add_Click({ $window.WindowState = 'Minimized' })
+    $ui.CloseButton.add_Click({ $window.Close() })
+    $window.add_KeyDown({ param($s, $e) if ($e.Key -eq 'Escape') { $window.Close() } })
 
     $timer = New-Object Windows.Threading.DispatcherTimer -Property @{ Interval = [TimeSpan]::FromSeconds(30) }
     $timer.add_Tick($showBattery)
     $timer.Start()
 
-    if ($dark) {
-        Add-Type -Namespace Win32 -Name Dwm -MemberDefinition '[DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);'
-        $window.add_SourceInitialized({
-            $hwnd = (New-Object Windows.Interop.WindowInteropHelper($window)).Handle
-            $on = 1; [void][Win32.Dwm]::DwmSetWindowAttribute($hwnd, 20, [ref]$on, 4)   # dark title bar
-        })
-    }
+    $window.add_SourceInitialized({
+        $hwnd = (New-Object Windows.Interop.WindowInteropHelper($window)).Handle
+        # Dark frame and rounded corners on Windows 11; builds that don't know an attribute ignore it.
+        $on = 1; [void][PowerManager.Native]::DwmSetWindowAttribute($hwnd, 20, [ref]$on, 4)      # immersive dark mode
+        $round = 2; [void][PowerManager.Native]::DwmSetWindowAttribute($hwnd, 33, [ref]$round, 4) # rounded corners
+    })
     # A task-started window can open behind others; Topmost is dropped once it's shown.
     $window.add_ContentRendered({ $window.Activate(); $window.Topmost = $false })
 
@@ -318,10 +689,12 @@ function Show-Window {
 
 if ($Mode -eq 'Window') { Show-Window; exit 0 }
 
-$current = Get-ChargeCfg
 if ($Mode -eq 'Status') {
-    Show-Result "Charge mode: $current`n$(Get-BatteryText)"; exit 0
+    $charge = if ($cctk) { "Charge mode: $(Get-ChargeCfg)" } else { 'Charge mode: Dell Command | Configure not installed' }
+    Show-Result "$charge`n$(Get-BatteryText)`n`n$(Get-HealthText)"; exit 0
 }
+
+$current = Get-ChargeCfg
 if ($Mode -eq 'Toggle') {
     $Mode = if ($current -like 'Custom*') { 'Full' } else { 'Limit' }
 }

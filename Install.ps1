@@ -4,7 +4,7 @@
 #  - Registers a scheduled task (\PowerManager\Window) that runs as you with highest
 #    privileges, on demand only.
 #  - The desktop shortcut starts that task with Start-ScheduledTask, which needs no elevation.
-# Run: pwsh -File Install.ps1   (asks for UAC once)
+# Run: powershell -ExecutionPolicy Bypass -File Install.ps1   (or pwsh -File Install.ps1; asks for UAC once)
 
 $ErrorActionPreference = 'Stop'
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
@@ -19,6 +19,10 @@ $dest = Join-Path $env:ProgramFiles 'PowerManager'
 New-Item -ItemType Directory -Force $dest | Out-Null
 Copy-Item (Join-Path $PSScriptRoot 'PowerManager.ps1') $dest -Force
 $script = Join-Path $dest 'PowerManager.ps1'
+# Optional custom background image; remove an installed one that's no longer in the repo.
+Remove-Item (Join-Path $dest 'background.*') -ErrorAction SilentlyContinue
+Get-ChildItem $PSScriptRoot -File | Where-Object { $_.BaseName -eq 'background' -and $_.Extension -in '.png', '.jpg', '.jpeg' } |
+    Select-Object -First 1 | Copy-Item -Destination $dest
 
 # Windows PowerShell lives in System32 (admin-protected), unlike the Store pwsh alias.
 $ps = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
