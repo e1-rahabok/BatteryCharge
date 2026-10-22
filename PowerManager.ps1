@@ -1,9 +1,10 @@
 <#
 .SYNOPSIS
-  Switch the Dell battery charge mode without rebooting, using Dell Command | Configure (cctk.exe).
+  Power Manager: switch the Dell battery charge mode without rebooting (Dell Command | Configure,
+  cctk.exe), and force Windows to sleep.
 
 .PARAMETER Mode
-  Window - Small window showing the current setting, with a button to switch it
+  Window - Small window showing the current setting, with buttons to switch it and to force sleep
   Full   - Standard charging, charges to 100% (use before going unplugged)
   Limit  - Custom charging, stops at -Stop (default 65%) and resumes below -Start (default 50%)
   Toggle - Switch between Full and Limit
@@ -27,7 +28,7 @@ $cctk = 'C:\Program Files (x86)\Dell\Command Configure\X86_64\cctk.exe'
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 function Show-Result([string]$Text, [string]$Icon = 'Information') {
     if (-not $Quiet) {
-        [void][System.Windows.Forms.MessageBox]::Show($Text, 'Battery Charge', 'OK', $Icon)
+        [void][System.Windows.Forms.MessageBox]::Show($Text, 'Power Manager', 'OK', $Icon)
     }
     Write-Output $Text
 }
@@ -80,6 +81,51 @@ function Set-ChargeMode([string]$Target) {
     }
 }
 
+# Never closed by Force Sleep, whatever powercfg reports.
+$sleepProtected = 'System', 'Idle', 'csrss', 'wininit', 'winlogon', 'services', 'lsass', 'smss', 'svchost',
+    'dwm', 'explorer', 'fontdrvhost', 'Registry', 'MsMpEng', 'audiodg', 'powershell', 'pwsh'
+
+# Processes holding a power request (powercfg /requests, needs admin) that keeps Windows awake.
+function Get-SleepBlockers {
+    $procs = @{}
+    $category = $null
+    foreach ($line in (powercfg /requests)) {
+        $line = $line.Trim()
+        if ($line -match '^([A-Z]+):$') { $category = $Matches[1]; continue }
+        if ($category -notin 'DISPLAY', 'SYSTEM', 'AWAYMODE', 'EXECUTION') { continue }
+        if ($line -notmatch '^\[PROCESS\]\s+(.+)$') { continue }
+        # powercfg gives an NT path such as \Device\HarddiskVolume3\Program Files\App\app.exe
+        $path = $Matches[1]
+        $name = [IO.Path]::GetFileNameWithoutExtension($path)
+        if ($name -in $sleepProtected) { continue }
+        $tail = $path -replace '^\\Device\\[^\\]+', ''
+        Get-Process -Name $name -ErrorAction SilentlyContinue |
+            Where-Object { -not $_.Path -or $_.Path.EndsWith($tail, [StringComparison]::OrdinalIgnoreCase) } |
+            ForEach-Object { $procs[$_.Id] = $_ }
+    }
+    @($procs.Values)
+}
+
+# Asks each process to close (like clicking X), then kills those still running after 10 seconds.
+# $wait runs between checks; the window passes one that keeps it repainting.
+function Stop-SleepBlockers($procs, [scriptblock]$wait = { Start-Sleep -Milliseconds 500 }) {
+    foreach ($p in $procs) { try { [void]$p.CloseMainWindow() } catch {} }
+    $deadline = (Get-Date).AddSeconds(10)
+    while ((Get-Date) -lt $deadline -and ($procs | Where-Object { -not $_.HasExited })) { & $wait }
+    foreach ($p in $procs | Where-Object { -not $_.HasExited }) {
+        try { Stop-Process -Id $p.Id -Force } catch {}
+    }
+}
+
+function Invoke-Sleep {
+    if (-not ('Win32.Power' -as [type])) {
+        Add-Type -Namespace Win32 -Name Power -MemberDefinition '[DllImport("powrprof.dll", SetLastError = true)] public static extern bool SetSuspendState(bool hibernate, bool forceCritical, bool disableWakeEvent);'
+    }
+    if (-not [Win32.Power]::SetSuspendState($false, $false, $false)) {
+        throw "Windows refused to sleep (error $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))."
+    }
+}
+
 function Show-Window {
     Add-Type -AssemblyName PresentationFramework
     $dark = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -ErrorAction SilentlyContinue).AppsUseLightTheme -eq 0
@@ -95,7 +141,7 @@ function Show-Window {
     $xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Battery Charge" SizeToContent="WidthAndHeight" ResizeMode="NoResize"
+        Title="Power Manager" SizeToContent="WidthAndHeight" ResizeMode="NoResize"
         WindowStartupLocation="CenterScreen" Topmost="True" UseLayoutRounding="True"
         Background="@Bg@" Foreground="@Text@" FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="14">
   <Window.Icon>
@@ -150,17 +196,36 @@ function Show-Window {
       </Button.Template>
     </Button>
     <TextBlock x:Name="Hint" Foreground="@Sub@" FontSize="12" HorizontalAlignment="Center" Margin="0,8,0,0"/>
+    <Border Height="1" Background="@Line@" Margin="0,20,0,18"/>
+    <Button x:Name="Sleep" Height="34" Content="Force Sleep" Background="Transparent" Foreground="@Text@"
+            BorderBrush="@Shell@" Cursor="Hand" FocusVisualStyle="{x:Null}">
+      <Button.Template>
+        <ControlTemplate TargetType="Button">
+          <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                  BorderThickness="1" CornerRadius="6">
+            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Bd" Property="Background" Value="@Line@"/></Trigger>
+            <Trigger Property="IsPressed" Value="True"><Setter TargetName="Bd" Property="Opacity" Value="0.78"/></Trigger>
+            <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Bd" Property="Opacity" Value="0.5"/></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Button.Template>
+    </Button>
+    <TextBlock Foreground="@Sub@" FontSize="12" HorizontalAlignment="Center" Margin="0,8,0,0"
+               Text="Closes apps that keep Windows awake, then sleeps."/>
   </StackPanel>
 </Window>
 "@
     foreach ($k in $c.Keys) { $xaml = $xaml.Replace("@$k@", $c[$k]) }
     $window = [Windows.Markup.XamlReader]::Parse($xaml)
     $ui = @{}
-    foreach ($n in 'Fill', 'CapMark', 'Percent', 'Power', 'Dot', 'Status', 'Detail', 'Action', 'Hint') { $ui[$n] = $window.FindName($n) }
+    foreach ($n in 'Fill', 'CapMark', 'Percent', 'Power', 'Dot', 'Status', 'Detail', 'Action', 'Hint', 'Sleep') { $ui[$n] = $window.FindName($n) }
     $brush = { param($hex) (New-Object Windows.Media.BrushConverter).ConvertFromString($hex) }
 
     # Handlers run in a child scope, so shared state lives in a hashtable.
-    $state = @{ Capped = $false }
+    $state = @{ Capped = $false; Sleep = $false }
     $showBattery = {
         $b = Get-Battery
         if ($b) {
@@ -203,10 +268,31 @@ function Show-Window {
         try {
             Set-ChargeMode $(if ($state.Capped) { 'Full' } else { 'Limit' })
         } catch {
-            [void][Windows.MessageBox]::Show($window, $_.Exception.Message, 'Battery Charge', 'OK', 'Error')
+            [void][Windows.MessageBox]::Show($window, $_.Exception.Message, 'Power Manager', 'OK', 'Error')
         }
         & $refresh
         $ui.Action.IsEnabled = $true
+    })
+    $ui.Sleep.add_Click({
+        $procs = Get-SleepBlockers
+        $text = 'Put the laptop to sleep now?'
+        if ($procs) {
+            $names = ($procs | ForEach-Object { $_.ProcessName } | Sort-Object -Unique) -join ', '
+            $text += "`n`nThese apps are keeping Windows awake and will be closed. Unsaved work in them will be lost:`n`n$names"
+        }
+        if ([Windows.MessageBox]::Show($window, $text, 'Force Sleep', 'YesNo', 'Question') -ne 'Yes') { return }
+        $ui.Sleep.IsEnabled = $false
+        $ui.Action.IsEnabled = $false
+        if ($procs) {
+            $ui.Sleep.Content = 'Closing apps...'
+            Stop-SleepBlockers $procs {
+                $window.Dispatcher.Invoke([action] {}, [Windows.Threading.DispatcherPriority]::Background)
+                Start-Sleep -Milliseconds 200
+            }
+        }
+        # Sleep after the window closes, so it isn't left open on wake.
+        $state.Sleep = $true
+        $window.Close()
     })
 
     $timer = New-Object Windows.Threading.DispatcherTimer -Property @{ Interval = [TimeSpan]::FromSeconds(30) }
@@ -225,6 +311,9 @@ function Show-Window {
 
     & $refresh
     [void]$window.ShowDialog()
+    if ($state.Sleep) {
+        try { Invoke-Sleep } catch { Show-Result $_.Exception.Message 'Error' }
+    }
 }
 
 if ($Mode -eq 'Window') { Show-Window; exit 0 }
