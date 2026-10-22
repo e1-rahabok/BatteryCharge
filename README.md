@@ -148,3 +148,7 @@ Unregister-ScheduledTask -TaskPath '\PowerManager\' -TaskName Window -Confirm:$f
 Remove-Item "$env:ProgramFiles\PowerManager" -Recurse -Force
 Remove-Item "$([Environment]::GetFolderPath('Desktop'))\Power Manager.lnk"
 ```
+
+## License
+
+[MIT](LICENSE). Free to use, change and share, including commercially, as long as the copyright notice is kept.
