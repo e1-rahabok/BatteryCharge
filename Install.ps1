@@ -1,9 +1,9 @@
-# One-time setup so the desktop icons switch the battery charge mode without a UAC prompt.
+# One-time setup so the desktop icon opens the battery charge window without a UAC prompt.
 #  - Copies BatteryCharge.ps1 to C:\Program Files\BatteryCharge (admin-only write, so the
 #    elevated task can't be hijacked by editing the script).
-#  - Registers two scheduled tasks (\BatteryCharge\Full, \BatteryCharge\Limit) that run as
-#    you with highest privileges, on demand only.
-#  - Desktop shortcuts start those tasks via schtasks.exe, which needs no elevation.
+#  - Registers a scheduled task (\BatteryCharge\Window) that runs as you with highest
+#    privileges, on demand only.
+#  - The desktop shortcut starts that task with Start-ScheduledTask, which needs no elevation.
 # Run: pwsh -File Install.ps1   (asks for UAC once)
 
 $ErrorActionPreference = 'Stop'
@@ -24,30 +24,36 @@ $script = Join-Path $dest 'BatteryCharge.ps1'
 $ps = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
 $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
+# The window stays open until closed, so allow it an hour before Task Scheduler ends it.
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-    -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -MultipleInstances IgnoreNew
+    -ExecutionTimeLimit (New-TimeSpan -Hours 1) -MultipleInstances IgnoreNew
+
+$action = New-ScheduledTaskAction -Execute $ps -WorkingDirectory $dest `
+    -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script`" -Mode Window"
+Register-ScheduledTask -TaskPath '\BatteryCharge\' -TaskName Window -Action $action `
+    -Principal $principal -Settings $settings -Description 'Show and switch the battery charge limit' -Force | Out-Null
 
 $desktop = [Environment]::GetFolderPath('Desktop')
-$shell = New-Object -ComObject WScript.Shell
-$tasks = @(
-    @{ Mode = 'Full';  Name = 'Battery 100% charge'; Desc = 'Charge battery to 100% (before going unplugged)' }
-    @{ Mode = 'Limit'; Name = 'Battery 65% limit';   Desc = 'Limit battery charge to 65% (when on AC)' }
-)
-foreach ($t in $tasks) {
-    $action = New-ScheduledTaskAction -Execute $ps -WorkingDirectory $dest `
-        -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script`" -Mode $($t.Mode)"
-    Register-ScheduledTask -TaskPath '\BatteryCharge\' -TaskName $t.Mode -Action $action `
-        -Principal $principal -Settings $settings -Description $t.Desc -Force | Out-Null
+$lnk = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $desktop 'Battery Charge.lnk'))
+# Starting a task needs no elevation; show why if it fails instead of failing silently.
+$lnk.TargetPath = $ps
+$lnk.Arguments = '-NoProfile -WindowStyle Hidden -Command "try { Start-ScheduledTask -TaskPath ''\BatteryCharge\'' ' +
+    '-TaskName Window -ErrorAction Stop } catch { Add-Type -AssemblyName System.Windows.Forms; ' +
+    '[void][System.Windows.Forms.MessageBox]::Show(''Could not start the Battery Charge task. Run Install.ps1 again.'' + ' +
+    '[char]10 + [char]10 + $_.Exception.Message, ''Battery Charge'', ''OK'', ''Error'') }"'
+$lnk.WorkingDirectory = $dest
+$lnk.IconLocation = "$env:SystemRoot\System32\powercpl.dll,0"
+$lnk.Description = 'Show and switch the battery charge limit'
+$lnk.WindowStyle = 7   # minimized
+$lnk.Save()
 
-    $lnk = $shell.CreateShortcut((Join-Path $desktop "$($t.Name).lnk"))
-    $lnk.TargetPath = "$env:SystemRoot\System32\schtasks.exe"
-    $lnk.Arguments = "/run /tn `"\BatteryCharge\$($t.Mode)`""
-    $lnk.WorkingDirectory = $dest
-    $lnk.IconLocation = "$env:SystemRoot\System32\powercpl.dll,0"
-    $lnk.Description = $t.Desc
-    $lnk.WindowStyle = 7   # minimized
-    $lnk.Save()
+# Remove the earlier two-icon setup.
+foreach ($old in 'Full', 'Limit') {
+    Get-ScheduledTask -TaskPath '\BatteryCharge\' -TaskName $old -ErrorAction SilentlyContinue |
+        Unregister-ScheduledTask -Confirm:$false
 }
+Remove-Item (Join-Path $desktop 'Battery 100% charge.lnk'), (Join-Path $desktop 'Battery 65% limit.lnk') `
+    -ErrorAction SilentlyContinue
 
 # Remove the earlier per-user copy.
 Remove-Item (Join-Path $env:LOCALAPPDATA 'BatteryCharge') -Recurse -Force -ErrorAction SilentlyContinue

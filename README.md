@@ -2,6 +2,7 @@
 
 Switch a Dell laptop's battery charge mode without rebooting, using Dell Command | Configure (`cctk.exe`).
 
+- **Window**: a small window shows the current limit (65% or 100%), with one button to switch it
 - **Full**: Standard charging to 100% (use before going unplugged)
 - **Limit**: Custom charging, stops at 65% and resumes below 50% (configurable with `-Start` / `-Stop`)
 - **Toggle**: switch between the two
@@ -25,10 +26,13 @@ pwsh -File Install.ps1
 Approve the single UAC prompt. The installer:
 
 1. Copies `BatteryCharge.ps1` to `C:\Program Files\BatteryCharge` (only admins can edit it there).
-2. Registers two on-demand scheduled tasks, `\BatteryCharge\Full` and `\BatteryCharge\Limit`, that run as you with highest privileges.
-3. Creates two desktop shortcuts, **Battery 100% charge** and **Battery 65% limit**, that start those tasks.
+2. Registers an on-demand scheduled task, `\BatteryCharge\Window`, that runs as you with highest privileges.
+3. Creates one desktop shortcut, **Battery Charge**, that starts that task.
+4. Removes the older two-icon setup (the `Full`/`Limit` tasks and their shortcuts), if present.
 
-After that, double-click an icon to switch modes. There's **no UAC prompt**, and a small popup confirms the new setting and the battery level. The change takes effect immediately, with no reboot.
+After that, double-click **Battery Charge**. There's **no UAC prompt**. A small window shows whether charging is capped at 65% or uncapped, along with the battery level. One button switches it: **Charge to 100%** when capped, **Cap at 65%** when uncapped. The change takes effect immediately, with no reboot.
+
+Task Scheduler closes the window if it's left open for more than an hour.
 
 To install again after editing the script (for example to change the 65% limit), run `Install.ps1` again.
 
@@ -37,9 +41,9 @@ To install again after editing the script (for example to change the 65% limit),
 Run in an elevated PowerShell:
 
 ```powershell
-Unregister-ScheduledTask -TaskPath '\BatteryCharge\' -TaskName Full, Limit -Confirm:$false
+Unregister-ScheduledTask -TaskPath '\BatteryCharge\' -TaskName Window -Confirm:$false
 Remove-Item "$env:ProgramFiles\BatteryCharge" -Recurse -Force
-Remove-Item "$([Environment]::GetFolderPath('Desktop'))\Battery*.lnk"
+Remove-Item "$([Environment]::GetFolderPath('Desktop'))\Battery Charge.lnk"
 ```
 
 ## Manual usage
@@ -47,6 +51,7 @@ Remove-Item "$([Environment]::GetFolderPath('Desktop'))\Battery*.lnk"
 From an elevated prompt, or let the script prompt for UAC itself:
 
 ```powershell
+pwsh -File BatteryCharge.ps1 -Mode Window
 pwsh -File BatteryCharge.ps1 -Mode Limit -Start 50 -Stop 65
 pwsh -File BatteryCharge.ps1 -Mode Full
 pwsh -File BatteryCharge.ps1 -Mode Status
