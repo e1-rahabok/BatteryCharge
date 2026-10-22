@@ -24,15 +24,12 @@ Everything the app uses is a long-standing Windows interface, so Windows updates
 
 ## Install
 
-1. Download or clone this repository.
+1. Download `PowerManager.zip` from the [latest release](https://github.com/e1-rahabok/BatteryCharge/releases/latest) and unzip it (right-click > **Extract All**).
 2. Dell only: install [Dell Command | Configure](https://www.dell.com/support/kbdoc/en-us/000178000/dell-command-configure) if you want the charge limit.
-3. In the repository folder, run:
+3. Double-click **Install.cmd**. If Windows shows "Windows protected your PC", click **More info > Run anyway**.
+4. Click **Yes** on the admin prompt.
 
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File Install.ps1
-   ```
-
-4. Approve the single UAC prompt.
+From a PowerShell prompt you can run `powershell -ExecutionPolicy Bypass -File Install.ps1` instead.
 
 The installer:
 
@@ -43,7 +40,7 @@ The installer:
 
 After that, double-click **Power Manager**. There's **no UAC prompt**, because the shortcut starts the pre-approved task instead of asking for admin rights each time.
 
-Run `Install.ps1` again after any change to the script or background.
+Run `Install.cmd` again after any change to the script or background, or to update to a new release.
 
 ## Using it
 
