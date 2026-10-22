@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
-  Power Manager: battery charge limit, battery health and Force Sleep in one small Windows 11 window.
+  Power Manager: battery charge limit, battery health and Hibernate now in one small Windows 11 window.
 
 .PARAMETER Mode
-  Window - The Power Manager window (charge limit, battery health, Force Sleep)
+  Window - The Power Manager window (charge limit, battery health, Hibernate now)
   Full   - Standard charging, charges to 100% (use before going unplugged)       [Dell only]
   Limit  - Custom charging, stops at -Stop (default 65%), resumes below -Start   [Dell only]
   Toggle - Switch between Full and Limit                                         [Dell only]
@@ -12,7 +12,7 @@
 .NOTES
   Needs admin rights; the script re-launches itself elevated (UAC prompt) when needed.
   The charge limit uses Dell Command | Configure (cctk.exe). Without it, the window still shows
-  battery health and Force Sleep, and hides the charge limit card.
+  battery health and Hibernate now, and hides the charge limit card.
   Dell limits: Start 50-95, Stop 55-100, Stop must be at least 5 above Start.
   Customise: colours in $Theme below; put background.png or background.jpg next to this script
   to replace the built-in background. See README.md.
@@ -72,7 +72,7 @@ if ($Stop - $Start -lt 5) {
     Show-Result "Stop ($Stop) must be at least 5 higher than Start ($Start)." 'Error'; exit 1
 }
 
-# Native calls, compiled once: battery driver query, sleep, and title bar colour.
+# Native calls, compiled once: battery driver query and title bar colour.
 if (-not ('PowerManager.Native' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
@@ -144,9 +144,6 @@ public static class Native {
         return result;
     }
 
-    [DllImport("powrprof.dll", SetLastError = true)]
-    public static extern bool SetSuspendState(bool hibernate, bool forceCritical, bool disableWakeEvent);
-
     [DllImport("dwmapi.dll")]
     public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 }
@@ -204,45 +201,13 @@ function Set-ChargeMode([string]$Target) {
     }
 }
 
-# Never closed by Force Sleep, whatever powercfg reports.
-$sleepProtected = 'System', 'Idle', 'csrss', 'wininit', 'winlogon', 'services', 'lsass', 'smss', 'svchost',
-    'dwm', 'explorer', 'fontdrvhost', 'Registry', 'MsMpEng', 'audiodg', 'powershell', 'pwsh'
-
-# Processes holding a power request (powercfg /requests, needs admin) that keeps Windows awake.
-function Get-SleepBlockers {
-    $procs = @{}
-    $category = $null
-    foreach ($line in (powercfg /requests)) {
-        $line = $line.Trim()
-        if ($line -match '^([A-Z]+):$') { $category = $Matches[1]; continue }
-        if ($category -notin 'DISPLAY', 'SYSTEM', 'AWAYMODE', 'EXECUTION') { continue }
-        if ($line -notmatch '^\[PROCESS\]\s+(.+)$') { continue }
-        # powercfg gives an NT path such as \Device\HarddiskVolume3\Program Files\App\app.exe
-        $path = $Matches[1]
-        $name = [IO.Path]::GetFileNameWithoutExtension($path)
-        if ($name -in $sleepProtected) { continue }
-        $tail = $path -replace '^\\Device\\[^\\]+', ''
-        Get-Process -Name $name -ErrorAction SilentlyContinue |
-            Where-Object { -not $_.Path -or $_.Path.EndsWith($tail, [StringComparison]::OrdinalIgnoreCase) } |
-            ForEach-Object { $procs[$_.Id] = $_ }
-    }
-    @($procs.Values)
-}
-
-# Asks each process to close (like clicking X), then kills those still running after 10 seconds.
-# $wait runs between checks; the window passes one that keeps it repainting.
-function Stop-SleepBlockers($procs, [scriptblock]$wait = { Start-Sleep -Milliseconds 500 }) {
-    foreach ($p in $procs) { try { [void]$p.CloseMainWindow() } catch {} }
-    $deadline = (Get-Date).AddSeconds(10)
-    while ((Get-Date) -lt $deadline -and ($procs | Where-Object { -not $_.HasExited })) { & $wait }
-    foreach ($p in $procs | Where-Object { -not $_.HasExited }) {
-        try { Stop-Process -Id $p.Id -Force } catch {}
-    }
-}
-
-function Invoke-Sleep {
-    if (-not [PowerManager.Native]::SetSuspendState($false, $false, $false)) {
-        throw "Windows refused to sleep (error $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))."
+# Saves everything to disk and powers off. Unlike sleep (Modern Standby), no app or driver can keep
+# the laptop running and warm, and nothing is closed: the session is restored on power-on.
+function Invoke-Hibernate {
+    $output = & "$env:SystemRoot\System32\shutdown.exe" /h 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        throw "Windows couldn't hibernate (shutdown /h exit $LASTEXITCODE).`n`n$($output.Trim())`n`n" +
+            "Hibernate may be turned off. To turn it on, run this in an admin PowerShell: powercfg /hibernate on"
     }
 }
 
@@ -506,17 +471,17 @@ function New-WindowXaml {
           </StackPanel>
         </Border>
 
-        <!-- Sleep -->
+        <!-- Hibernate -->
         <Border Style="{StaticResource Glass}">
           <Grid>
-            <StackPanel VerticalAlignment="Center" Margin="0,0,128,0">
+            <StackPanel VerticalAlignment="Center" Margin="0,0,140,0">
               <StackPanel Orientation="Horizontal">
                 <TextBlock Style="{StaticResource Icon}" Text="&#xE708;"/>
-                <TextBlock Style="{StaticResource Label}" Text="Sleep"/>
+                <TextBlock Style="{StaticResource Label}" Text="Turn off, keep everything"/>
               </StackPanel>
-              <TextBlock Style="{StaticResource Small}" Text="Closes apps keeping Windows awake" Margin="0,4,0,0"/>
+              <TextBlock Style="{StaticResource Small}" Text="Saves open apps, then powers off. No heat in your bag." Margin="0,4,0,0"/>
             </StackPanel>
-            <Button x:Name="Sleep" Style="{StaticResource Outline}" HorizontalAlignment="Right" VerticalAlignment="Center" Content="Force Sleep"/>
+            <Button x:Name="Hibernate" Style="{StaticResource Outline}" HorizontalAlignment="Right" VerticalAlignment="Center" Content="Hibernate now"/>
           </Grid>
         </Border>
       </StackPanel>
@@ -537,7 +502,7 @@ function Show-Window {
     $ui = @{}
     foreach ($n in 'Arc', 'CapTick', 'Percent', 'PowerIcon', 'Power', 'Status', 'Detail', 'Badge', 'BadgeText',
                    'Action', 'ActionText', 'HealthText', 'DesignCap', 'FullCap', 'Cycles', 'HealthBar', 'HealthGlow',
-                   'Sleep', 'MinButton', 'CloseButton', 'BgImage') {
+                   'Hibernate', 'MinButton', 'CloseButton', 'BgImage') {
         $ui[$n] = $window.FindName($n)
     }
     $brush = { param($hex) (New-Object Windows.Media.BrushConverter).ConvertFromString($hex) }
@@ -559,7 +524,7 @@ function Show-Window {
     }
 
     # Handlers run in a child scope, so shared state lives in a hashtable.
-    $state = @{ Capped = $false; Sleep = $false; Cap = $null }
+    $state = @{ Capped = $false; Hibernate = $false }
     $showBattery = {
         $b = Get-Battery
         if (-not $b) {
@@ -642,25 +607,12 @@ function Show-Window {
         & $refresh
         $ui.Action.IsEnabled = $true
     })
-    $ui.Sleep.add_Click({
-        $procs = Get-SleepBlockers
-        $text = 'Put the laptop to sleep now?'
-        if ($procs) {
-            $names = ($procs | ForEach-Object { $_.ProcessName } | Sort-Object -Unique) -join ', '
-            $text += "`n`nThese apps are keeping Windows awake and will be closed. Unsaved work in them will be lost:`n`n$names"
-        }
-        if ([Windows.MessageBox]::Show($window, $text, 'Force Sleep', 'YesNo', 'Question') -ne 'Yes') { return }
-        $ui.Sleep.IsEnabled = $false
+    $ui.Hibernate.add_Click({
+        $ui.Hibernate.IsEnabled = $false
         $ui.Action.IsEnabled = $false
-        if ($procs) {
-            $ui.Sleep.Content = 'Closing apps...'
-            Stop-SleepBlockers $procs {
-                $window.Dispatcher.Invoke([action] {}, [Windows.Threading.DispatcherPriority]::Background)
-                Start-Sleep -Milliseconds 200
-            }
-        }
-        # Sleep after the window closes, so it isn't left open on wake.
-        $state.Sleep = $true
+        $ui.Hibernate.Content = 'Hibernating...'
+        # Hibernate after the window closes, so it isn't still open on power-on.
+        $state.Hibernate = $true
         $window.Close()
     })
     $ui.MinButton.add_Click({ $window.WindowState = 'Minimized' })
@@ -682,8 +634,8 @@ function Show-Window {
 
     & $refresh
     [void]$window.ShowDialog()
-    if ($state.Sleep) {
-        try { Invoke-Sleep } catch { Show-Result $_.Exception.Message 'Error' }
+    if ($state.Hibernate) {
+        try { Invoke-Hibernate } catch { Show-Result $_.Exception.Message 'Error' }
     }
 }
 

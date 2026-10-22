@@ -1,14 +1,14 @@
 # Power Manager
 
-One small window for your Windows 11 laptop's battery and sleep:
+One small window for your Windows 11 laptop's battery:
 
 - **Charge limit**: cap charging at 65% while you're docked, or charge to 100% before you go out. Switches immediately, with no reboot (Dell laptops, via Dell Command | Configure).
 - **Battery health**: the battery's original (design) capacity, its full charge capacity today, and how many charge cycles it has completed.
-- **Force Sleep**: closes the apps that keep Windows awake, then puts the laptop to sleep.
+- **Hibernate now**: saves everything you have open and powers the laptop fully off, so it can't heat up in a bag. Nothing is closed; it all comes back when you turn the laptop on.
 
-<p align="center"><img src="docs/screenshot.png" width="400" alt="Power Manager window: battery ring at 65%, charge limit card, battery health card, Force Sleep card"></p>
+<p align="center"><img src="docs/screenshot.png" width="400" alt="Power Manager window: battery ring at 65%, charge limit card, battery health card, Hibernate now card"></p>
 
-Battery health and Force Sleep work on any Windows 11 laptop. The charge limit needs a Dell laptop out of the box; on other brands that card says "Not available" until you plug in your vendor's tool (see [Other laptop brands](#other-laptop-brands)).
+Battery health and Hibernate now work on any Windows 11 laptop. The charge limit needs a Dell laptop out of the box; on other brands that card says "Not available" until you plug in your vendor's tool (see [Other laptop brands](#other-laptop-brands)).
 
 ## Compatibility
 
@@ -18,7 +18,7 @@ Battery health and Force Sleep work on any Windows 11 laptop. The charge limit n
 | Runtime | Built-in Windows PowerShell 5.1 and WPF (.NET Framework 4.8). Nothing to download. PowerShell 7 also works. |
 | Charge limit | Dell laptops with [Dell Command \| Configure](https://www.dell.com/support/kbdoc/en-us/000178000/dell-command-configure) installed and no BIOS admin password set. |
 | Battery health | Any laptop whose battery driver reports capacity and cycle count (almost all). Shows "--" for any value the battery doesn't report. |
-| Force Sleep | Any laptop, including Modern Standby (S0) laptops. |
+| Hibernate now | Any laptop with hibernate turned on (the default on most laptops). |
 
 Everything the app uses is a long-standing Windows interface, so Windows updates shouldn't break it. It doesn't use the HTML battery report, Store APIs, or anything that needs a particular Windows 11 build. The two Windows 11-only touches, dark window frame and rounded corners, are simply skipped by builds that don't support them.
 
@@ -47,9 +47,25 @@ Run `Install.cmd` again after any change to the script or background, or to upda
 - **Ring gauge**: current battery level and whether you're plugged in. When a charge limit is set, a white tick marks where charging stops.
 - **Charge limit**: shows whether charging is capped. The button switches between **Charge to 100%** and **Cap at 65%**. The change takes effect immediately.
 - **Battery health**: original capacity and full charge capacity in watt-hours, charge cycles, and health (full charge ÷ original). Health of 80% or more shows as Good, 60–79% as Worn, below 60% as Replace soon.
-- **Force Sleep**: checks which apps are keeping Windows awake (for example a browser playing video), lists them, and asks before closing them. Each app gets 10 seconds to close normally; any still running are then killed, so unsaved work in them is lost. Core Windows processes such as `svchost` and `explorer` are never closed. On Modern Standby laptops, sleep means Modern Standby, and the laptop then hibernates according to its "Hibernate after" power setting.
+- **Hibernate now**: saves your open apps and documents to disk and powers the laptop fully off. It can't be kept awake by apps or drivers, so it stays cool. Nothing is closed: when you turn the laptop on, everything is back as you left it. Turning on takes about 10-20 seconds instead of being instant.
 
 Press **Esc** or the close button to close the window. Task Scheduler ends the window if it's left open for more than an hour.
+
+## Stop the laptop getting hot in a bag
+
+Many Windows 11 laptops use Modern Standby instead of classic sleep. In Modern Standby the laptop is meant to drop to very low power, but an app, a driver or a dock can keep it running at full power with the lid closed. That's how a laptop ends up hot after hours in a backpack.
+
+Hibernate doesn't have that problem: the laptop is fully off. To make **closing the lid** hibernate (on battery and when plugged in), run this once in PowerShell:
+
+```powershell
+powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 2
+powercfg /setdcvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 2
+powercfg /setactive SCHEME_CURRENT
+```
+
+To go back to sleep on lid close, run the same commands with `1` instead of `2`. You can also change it in **Control Panel > Power Options > Choose what the closing the lid does**.
+
+To check whether standby really reaches low power on your laptop, run `powercfg /sleepstudy` in an admin PowerShell and open the report it saves.
 
 ## How it works
 
@@ -58,10 +74,9 @@ Press **Esc** or the close button to close the window. Task Scheduler ends the w
 | Battery level | `Win32_Battery` (WMI) |
 | Original capacity, full charge capacity, cycles | The battery driver itself, via `IOCTL_BATTERY_QUERY_INFORMATION`. This is the same data `powercfg /batteryreport` reads, but it takes a few milliseconds instead of generating an HTML file, and it needs no admin rights. Multiple batteries are added together. |
 | Charge limit | `cctk.exe --PrimaryBattChargeCfg` (Dell Command \| Configure) |
-| Apps keeping Windows awake | `powercfg /requests` |
-| Sleep | `SetSuspendState` (powrprof.dll) |
+| Hibernate now | `shutdown /h` |
 
-The window needs admin rights for `cctk.exe` and `powercfg /requests`. The scheduled task provides them without a prompt.
+The window needs admin rights for `cctk.exe`. The scheduled task provides them without a prompt.
 
 ## Customize
 
@@ -97,12 +112,6 @@ For example, a purple look: `Bg2 = '#2A0F55'`, `Bg3 = '#4B1A8A'`, `Ribbon1 = '#7
 ### Background image
 
 Put an image named `background.png` or `background.jpg` in the repository folder and run `Install.ps1` again. It's drawn over the ribbons at 35% opacity and cropped to fill the window. A dark image of about 800 × 1400 pixels works best. Delete it and reinstall to go back to the default.
-
-### Force Sleep
-
-- **Apps it never closes:** add process names (without `.exe`) to `$sleepProtected`.
-- **What counts as keeping Windows awake:** `Get-SleepBlockers` looks at the `DISPLAY`, `SYSTEM`, `AWAYMODE` and `EXECUTION` sections of `powercfg /requests`.
-- **Hibernate instead of sleep:** change `SetSuspendState($false, ...)` in `Invoke-Sleep` to `SetSuspendState($true, ...)`.
 
 ### Other laptop brands
 
