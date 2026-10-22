@@ -22,6 +22,20 @@ Battery health and Hibernate now work on any Windows 11 laptop. The charge limit
 
 Everything the app uses is a long-standing Windows interface, so Windows updates shouldn't break it. It doesn't use the HTML battery report, Store APIs, or anything that needs a particular Windows 11 build. The two Windows 11-only touches, dark window frame and rounded corners, are simply skipped by builds that don't support them.
 
+## Tested on a real laptop
+
+Version 1.0.0 was tested by hand on a Dell Pro Max 16 Premium with Windows 11 Pro 25H2, in daily use on a Thunderbolt dock and in a backpack. The hibernate results come from Windows' own event logs; the others from direct checks on the installed app:
+
+| Test | Result |
+|---|---|
+| Install from the release zip with `Install.cmd` | Pass. One admin prompt, then the shortcut opens the window with none. |
+| Charge limit reading (Dell Command \| Configure) | Pass. Showed the real BIOS setting, capped at 65%. |
+| Battery health | Pass. Matched Windows' own WMI values exactly (94,559 mWh, 8 cycles). |
+| **Hibernate now** button | Pass. Fully off (hibernate, S4) 26 s after the click, stayed off 15 min, and the session came back. |
+| Closing the lid, then carrying it in a backpack | Pass. Fully off 25 s after closing the lid, stayed off for 50 min in the bag, and the session came back on battery. |
+
+Before the fix, the same laptop spent 0% of its docked standby time in the low-power state, which is why it stayed hot. The full record, what wasn't tested yet, and commands to check the same things on your laptop are in [docs/TESTING.md](docs/TESTING.md).
+
 ## Install
 
 1. Download `PowerManager.zip` from the [latest release](https://github.com/e1-rahabok/BatteryCharge/releases/latest) and unzip it (right-click > **Extract All**).
