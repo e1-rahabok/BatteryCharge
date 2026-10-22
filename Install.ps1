@@ -35,7 +35,7 @@ $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoi
 $action = New-ScheduledTaskAction -Execute $ps -WorkingDirectory $dest `
     -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script`" -Mode Window"
 Register-ScheduledTask -TaskPath '\PowerManager\' -TaskName Window -Action $action `
-    -Principal $principal -Settings $settings -Description 'Switch the battery charge limit and force sleep' -Force | Out-Null
+    -Principal $principal -Settings $settings -Description 'Battery charge limit, battery health and hibernate' -Force | Out-Null
 
 $desktop = [Environment]::GetFolderPath('Desktop')
 $lnk = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $desktop 'Power Manager.lnk'))
@@ -47,7 +47,7 @@ $lnk.Arguments = '-NoProfile -WindowStyle Hidden -Command "try { Start-Scheduled
     '[char]10 + [char]10 + $_.Exception.Message, ''Power Manager'', ''OK'', ''Error'') }"'
 $lnk.WorkingDirectory = $dest
 $lnk.IconLocation = "$env:SystemRoot\System32\powercpl.dll,0"
-$lnk.Description = 'Switch the battery charge limit and force sleep'
+$lnk.Description = 'Battery charge limit, battery health and hibernate'
 $lnk.WindowStyle = 7   # minimized
 $lnk.Save()
 
