@@ -18,6 +18,7 @@ Most of the time it fixes itself at the next wake, so you may only notice the oc
 |---|---|
 | Laptop | Dell Pro Max 16 Premium (MA16250), Windows 11 Pro 25H2 (build 26200.9457), BIOS 1.13.1 |
 | Thunderbolt ports | 2 × Thunderbolt 5 (a separate Intel "Barlow Ridge" chip) and 1 × Thunderbolt 4 (built into the Intel Core Ultra processor) |
+| Port layout | The two Thunderbolt 5 ports are side by side, next to the HDMI port. The single Thunderbolt 4 port is on the opposite side of the laptop. Both Thunderbolt 5 ports are on the same chip, so moving a cable between them doesn't change the controller. |
 | Dock | Dell WD22TB4 Thunderbolt 4 dock, on a Thunderbolt 5 port |
 | Monitors | Dell U4320Q and LG UltraFine, both through the dock |
 | Graphics | Intel Arc Pro 140T (drives the dock's monitors) and NVIDIA RTX PRO 2000 |
@@ -122,7 +123,7 @@ Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-W
 
 ### Next steps
 
-- [ ] **Controller test (running since 23 October, 10:45).** The dock was moved from a Thunderbolt 5 port to the Thunderbolt 4 port, which is on the processor's built-in controller. After a few days of normal use, compare monitor-link failures with the 8 in 6 days on the Thunderbolt 5 port. Few or none would point to the Thunderbolt 5 controller or its driver. The WD22TB4 is a Thunderbolt 4 dock, so it runs at 40 Gbps on either port.
+- [ ] **Controller test (running since 23 October, 10:45).** The dock was moved from a Thunderbolt 5 port (one of the pair next to HDMI) to the single Thunderbolt 4 port on the opposite side, which is on the processor's built-in controller. After a few days of normal use, compare monitor-link failures with the 8 in 6 days on the Thunderbolt 5 port. Few or none would point to the Thunderbolt 5 controller or its driver. The WD22TB4 is a Thunderbolt 4 dock, so it runs at 40 Gbps on either port.
 - [ ] **Test the reset command** the next time the monitors get stuck, and record here whether it works.
 - [ ] **If the reset works,** add a **Reset dock** button to Power Manager that finds the dock's controller and restarts it.
 - [ ] **If failures continue on the Thunderbolt 4 port,** try setting *PCI Express > Link State Power Management* to Off when plugged in (currently Maximum power saving), then test again.
