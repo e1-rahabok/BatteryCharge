@@ -38,7 +38,7 @@ Before the fix, the same laptop spent 0% of its docked standby time in the low-p
 
 ## Install
 
-1. Download `PowerManager.zip` from the [latest release](https://github.com/e1-rahabok/BatteryCharge/releases/latest) and unzip it (right-click > **Extract All**).
+1. Download `PowerManager.zip` from the [latest release](https://github.com/e1-rahabok/PowerManager/releases/latest) and unzip it (right-click > **Extract All**).
 2. Dell only: install [Dell Command | Configure](https://www.dell.com/support/kbdoc/en-us/000178000/dell-command-configure) if you want the charge limit.
 3. Double-click **Install.cmd**. If Windows shows "Windows protected your PC", click **More info > Run anyway**.
 4. Click **Yes** on the admin prompt.
