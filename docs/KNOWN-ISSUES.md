@@ -2,7 +2,7 @@
 
 ## External monitors on a Thunderbolt dock not detected after wake or hibernate
 
-**Status:** under investigation (last updated 23 October 2026). A test is running; see [Next steps](#next-steps).
+**Status:** under investigation (last updated 23 October 2026). The Thunderbolt 5 port theory is not confirmed. A failure was also seen on the Thunderbolt 4 port; see [Next steps](#next-steps).
 
 ### Symptoms
 
@@ -83,7 +83,20 @@ The dock reports an older *package* label (01.01.03.01) because it keeps the lab
 
 Windows' USB4 connection manager, running the dock on the laptop's **separate Thunderbolt 5 controller**, sometimes doesn't release the DisplayPort input when it tears down the dock's monitor connection. The rebuild then fails for lack of resources. Usually the next wake recovers; occasionally the controller stays stuck until a restart.
 
-Not yet proven. The test below checks whether the controller is the cause.
+**Not confirmed, and weakened by the 23 October test.** After moving the dock to the Thunderbolt 4 port, the monitor link failed on the first standby wake (14:25:01). The laptop then hibernated and resumed at 14:40:17, which cleared it. The link failure happened on both controllers, so the Thunderbolt 5 controller alone doesn't explain the problem.
+
+Two candidate explanations remain:
+- **The standby path is the trigger.** Standby is where the link tears down and fails to rebuild. A full power-off (hibernate) reinitialises the controller and recovers it.
+- **The controller can get stuck on either port.** Failures are rare on the Thunderbolt 4 port so far, but four hours of data is too little to compare with the Thunderbolt 5 rate.
+
+### Event: 23 October, 14:25 (Thunderbolt 4 port)
+
+| Time | Event |
+|---|---|
+| 14:03:34 | Entered standby |
+| **14:25:01** | **Woke from standby. Monitor link failed (event ID 2).** |
+| 14:25:05 | Hibernated (the "hibernate after" timer) |
+| 14:40:17 | Resumed from hibernate. Monitor link OK. Both monitors active. |
 
 ### Workaround: reset the Thunderbolt controller instead of restarting
 
@@ -123,7 +136,7 @@ Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-W
 
 ### Next steps
 
-- [ ] **Controller test (running since 23 October, 10:45).** The dock was moved from a Thunderbolt 5 port (one of the pair next to HDMI) to the single Thunderbolt 4 port on the opposite side, which is on the processor's built-in controller. After a few days of normal use, compare monitor-link failures with the 8 in 6 days on the Thunderbolt 5 port. Few or none would point to the Thunderbolt 5 controller or its driver. The WD22TB4 is a Thunderbolt 4 dock, so it runs at 40 Gbps on either port.
+- [ ] **Port test (since 23 October, 10:45): inconclusive.** The dock moved from a Thunderbolt 5 port (one of the pair next to HDMI) to the single Thunderbolt 4 port on the opposite side, on the processor's built-in controller. One failure occurred on the Thunderbolt 4 port within four hours, on a standby wake, and hibernate cleared it. Keep the dock on the Thunderbolt 4 port, and record every standby wake with the dock connected. A clearly lower failure rate than 8 in 6 days would still be meaningful; a similar rate would rule the port out as a fix.
 - [ ] **Test the reset command** the next time the monitors get stuck, and record here whether it works.
 - [ ] **If the reset works,** add a **Reset dock** button to Power Manager that finds the dock's controller and restarts it.
 - [ ] **If failures continue on the Thunderbolt 4 port,** try setting *PCI Express > Link State Power Management* to Off when plugged in (currently Maximum power saving), then test again.
