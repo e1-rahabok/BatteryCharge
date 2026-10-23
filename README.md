@@ -158,6 +158,13 @@ powershell -ExecutionPolicy Bypass -File PowerManager.ps1 -Mode Toggle
 - **Charge limit says "Not available" on a Dell.** Install Dell Command | Configure. If it's installed, check that `cctk.exe` is under `Program Files (x86)\Dell\Command Configure\X86_64` or `Program Files\Dell\Command Configure\X86_64`.
 - **Changing the charge limit fails.** `cctk.exe` refuses changes when a BIOS admin password is set. The error message shows its output.
 - **Battery health shows "--".** The battery driver doesn't report that value. Some batteries don't report cycle counts.
+- **External monitors on a Thunderbolt dock don't come back after wake or hibernate.** This is a known issue under investigation, and it isn't caused by Power Manager. See [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md) for the analysis and a way to reset the Thunderbolt controller without restarting.
+
+## To do
+
+- [ ] Find the cause of external monitors not being detected through a Thunderbolt dock after wake or hibernate. A controller test is running. See [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md#next-steps).
+- [ ] Add a **Reset dock** button that restarts the dock's Thunderbolt controller, if the reset command proves to work.
+- [ ] Re-test switching the charge limit from the new window (see [docs/TESTING.md](docs/TESTING.md#not-yet-tested-by-hand)).
 
 ## Uninstall
 
